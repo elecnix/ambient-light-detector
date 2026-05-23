@@ -1,52 +1,77 @@
 # ambient-light-detector
 
-A lightweight daemon that keeps your screen brightness in sync with ambient light, using your webcam as the sensor.
+A software-based ambient light detector that uses your webcam to automatically adjust screen brightness.
 
-**How it works:**
-1. Grabs a JPEG frame from an [aeyes](https://github.com/elecnix/aeyes) daemon every second
-2. Measures the average luminance (0–255) of the frame
-3. Smooths the reading with an exponential moving average (EMA)
-4. Maps the smoothed value to a brightness range (5%–100% of max)
-5. **Ramps the brightness at 10 Hz** so changes feel silky-smooth — never a sudden jump
+## Why a Software-Based Solution?
 
-## Quick start
+This project exists because **many computers don't have hardware ambient light sensors (ALS)**.
+
+- Most desktop computers lack ALS entirely
+- All-in-One desktops (like HP 22-b009) often don't include ALS
+- Laptops from certain manufacturers may have ALS that doesn't work under Linux
+- The HP WMI ALS driver (`/sys/devices/platform/hp-wmi/als`) may return "Invalid argument" if the BIOS doesn't support the query
+
+**Rationale**: When you need adaptive brightness but lack hardware ALS, the webcam serves as a viable substitute. Modern webcams can capture frames, and the average luminance of those frames correlates with ambient light levels.
+
+## How It Works
+
+1. **Frame Capture**: Opens the webcam directly via V4L2 and captures a 320x240 frame
+2. **Luminance Calculation**: Computes average brightness using the luminance formula (Y = 0.2126R + 0.7152G + 0.0722B)
+3. **Exponential Smoothing**: Applies EMA smoothing to reduce noise and jitter
+4. **Brightness Mapping**: Maps smoothed luminance (0-1) to brightness range (min_fraction to 100%)
+5. **Smooth Transitions**: Ramps brightness gradually at configurable intervals (10Hz default)
+
+## Caveats and Drawbacks
+
+### Accuracy Limitations
+- **No calibrated lux readings**: Estimates are relative, not absolute light measurements
+- **Camera-dependent**: Image processing varies between webcams
+- **Indirect measurement**: Measures screen reflection more than true ambient light
+
+### Hardware Dependencies
+- **Active webcam LED**: The webcam indicator stays on while running (privacy consideration)
+- **USB bandwidth**: Uses webcam continuously at ~30fps internally
+- **Potential conflicts**: Can't be used simultaneously with other webcam applications
+
+### Reliability Issues
+- **Driver stuck states**: UVC driver can get stuck in buffer wait states (this happened after 6 days of continuous operation)
+- **USB disconnects**: Webcam reconnection requires service restart
+- **Permission issues**: Needs write access to `/sys/class/backlight/*/brightness`
+
+### Privacy Considerations
+- The camera is active whenever the daemon runs
+- No image storage - frames are processed in-memory and discarded
+- Consider covering webcam when not needed
+
+## Quick Start
 
 ```bash
-# 1. Make sure aeyes is running
-aeyes start
+# 1. Build
+cargo build --release
 
-# 2. Run the daemon (needs write access to backlight — see below)
-sudo ./target/debug/ambient-light-detector
+# 2. Run (may need root for brightness access)
+sudo ./target/release/ambient-light-detector --min-fraction 0.0
 
-# Or, with a custom aeyes URL:
-ambient-light-detector --aeyes-url http://192.168.1.50:43210
-
-# Or, with more verbose logging:
-ambient-light-detector -v
+# Or use systemd service (recommended)
+sudo systemctl enable --now ambient-light-detector
 ```
 
 ## Options
 
 ```
-Options:
-      --aeyes-url <URL>          aeyes daemon URL [default: http://127.0.0.1:43210]
-      --camera <ID>              camera ID [default: default]
-      --backlight <NAME>         backlight device name (auto-detected if omitted)
-      --min-fraction <FRAC>      minimum brightness as fraction of max [default: 0.05]
-      --alpha <ALPHA>            EMA smoothing factor [default: 0.08]
-      --ramp-rate <RATE>         brightness ramp speed as fraction/sec of max [default: 0.40]
-      --sample-interval <DUR>    time between frame samples [default: 1s]
-      --tick-interval <DUR>       time between brightness interpolation ticks [default: 100ms]
-  -v, --verbose                  enable debug logging
-  -h, --help                     show help
-  -V, --version                  show version
+--device <PATH>            Video device (default: /dev/video0)
+--backlight <NAME>         Backlight device name (auto-detected if omitted)
+--min-fraction <FRAC>      Minimum brightness as fraction (default: 0.05)
+--alpha <ALPHA>            EMA smoothing factor (default: 0.08)
+--ramp-seconds <SECONDS>   Time for full brightness sweep (default: 2.0)
+--sample-interval <DUR>    Time between frame samples (default: 1s)
+--tick-interval <DUR>       Tick interval for brightness updates (default: 5ms)
+-v, --verbose              Enable debug logging
 ```
 
-## Brightness permissions
+## Permissions
 
-The daemon needs write access to `/sys/class/backlight/*/brightness`. There are two approaches:
-
-### Option A: udev rule (recommended)
+Add your user to the `video` group and use a udev rule to allow brightness writes:
 
 ```bash
 # /etc/udev/rules.d/90-backlight.rules
@@ -54,29 +79,6 @@ SUBSYSTEM=="backlight", ACTION=="add", \
   RUN+="/bin/chgrp video /sys/class/backlight/%k/brightness", \
   RUN+="/bin/chmod g+w /sys/class/backlight/%k/brightness"
 ```
-
-Then add your user to the `video` group:
-```bash
-sudo usermod -aG video $USER
-# Log out and back in for the group change to take effect
-```
-
-### Option B: Run with sudo
-
-```bash
-sudo ambient-light-detector
-```
-
-The daemon will try direct file write first, then automatically fall back to `sudo tee` if needed.
-
-## Smooth brightness transitions
-
-The key design goal is that brightness changes **never jump**. Instead:
-
-- A new target brightness is computed from the webcam every **1 second**
-- A **background tick at 10 Hz** (configurable via `--tick-interval`) moves the current brightness toward the target in small increments
-- At the default ramp rate of **0.40** (40% of max brightness per second), a full swing from min to max takes about **2.5 seconds**
-- Combined with EMA smoothing on the light reading itself (default `--alpha 0.08`), this gives a buttery-smooth transition that is easy on the eyes
 
 ## License
 
