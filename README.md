@@ -29,7 +29,7 @@ This project exists because **many computers don't have hardware ambient light s
 - **Indirect measurement**: Measures screen reflection more than true ambient light
 
 ### Hardware Dependencies
-- **Active webcam LED**: The webcam indicator stays on while running (privacy consideration)
+- **Webcam LED behavior**: The webcam LED stays on continuously while running (not flashing) because the camera streams continuously for more responsive light detection. This is intentional to keep the sensor active.
 - **USB bandwidth**: Uses webcam continuously at ~30fps internally
 - **Potential conflicts**: Can't be used simultaneously with other webcam applications
 
