@@ -249,7 +249,13 @@ async fn main() -> Result<()> {
                 } else {
                     current.saturating_sub(step).max(target)
                 };
-                if write_brightness(&bl_clone, next).is_ok() {
+                // Write with timeout to prevent blocking the watchdog
+                let bl_path = bl_clone.clone();
+                let result = tokio::time::timeout(
+                    Duration::from_millis(100),
+                    async move { write_brightness(&bl_path, next) }
+                ).await;
+                if result.as_ref().map(|r| r.is_ok()).unwrap_or(false) {
                     current_clone.store(next, Ordering::SeqCst);
                 } else if let Ok(actual) = read_sysfs_u32(&bl_clone, "brightness") {
                     // Sync with reality on write failure
