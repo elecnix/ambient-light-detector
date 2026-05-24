@@ -37,7 +37,7 @@ struct Args {
     ramp_seconds: f32,
 
     /// Interval between frame samples (ambient light measurement)
-    #[arg(long, default_value = "1s")]
+    #[arg(long, default_value = "200ms")]
     sample_interval: humantime::Duration,
 
     /// Interval between brightness writes (smooth interpolation tick)
