@@ -298,7 +298,11 @@ async fn main() -> Result<()> {
                         let target = target_f.round() as u32;
                         let target = target.clamp(min_brightness, max_brightness);
 
-                        target_ref.store(target, Ordering::SeqCst);
+                        // Hysteresis: only update target if it changed by more than 1
+                        let old_target = target_ref.load(Ordering::SeqCst);
+                        if (target as i32 - old_target as i32).abs() > 1 {
+                            target_ref.store(target, Ordering::SeqCst);
+                        }
 
                         info!(
                             "luma={:.2} alpha={:.2} smoothed={:.3} target={} current={}",
