@@ -64,8 +64,9 @@ sudo systemctl enable --now ambient-light-detector
 --min-fraction <FRAC>      Minimum brightness as fraction (default: 0.05)
 --alpha <ALPHA>            EMA smoothing factor (default: 0.10)
 --ramp-seconds <SECONDS>   Time for full brightness sweep (default: 2.0)
---sample-interval <DUR>    Time between frame samples (default: 200ms)
+--sample-interval <DUR>    Time between frame samples (default: 500ms)
 --tick-interval <DUR>      Tick interval for brightness updates (default: 5ms)
+--min-change <CHANGE>      Minimum smoothed change to trigger update (default: 0.005)
 -v, --verbose              Enable debug logging
 ```
 
