@@ -1,0 +1,13 @@
+[Unit]
+Description=Ambient Light Detector — adjusts screen brightness from webcam luminance
+After=graphical.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ambient-light-detector --min-fraction 0.0 --tick-interval 2ms
+Restart=on-failure
+RestartSec=5
+WatchdogSec=0
+
+[Install]
+WantedBy=graphical.target
