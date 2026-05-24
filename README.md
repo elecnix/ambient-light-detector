@@ -62,11 +62,10 @@ sudo systemctl enable --now ambient-light-detector
 --device <PATH>            Video device (default: /dev/video0)
 --backlight <NAME>         Backlight device name (auto-detected if omitted)
 --min-fraction <FRAC>      Minimum brightness as fraction (default: 0.05)
---alpha <ALPHA>            EMA smoothing factor (default: 0.10)
+--alpha <ALPHA>            EMA smoothing factor (default: 0.03, lower = smoother)
 --ramp-seconds <SECONDS>   Time for full brightness sweep (default: 2.0)
---sample-interval <DUR>    Time between frame samples (default: 500ms)
---tick-interval <DUR>      Tick interval for brightness updates (default: 5ms)
---min-change <CHANGE>      Minimum smoothed change to trigger update (default: 0.005)
+--sample-interval <DUR>    Time between frame samples (default: 5s)
+--tick-interval <DUR>      Tick interval for brightness updates (default: 20ms)
 -v, --verbose              Enable debug logging
 ```
 
