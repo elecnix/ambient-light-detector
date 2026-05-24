@@ -184,9 +184,9 @@ fn adaptive_alpha(base_alpha: f32, diff: f32) -> f32 {
     if diff < 0.03 {
         base_alpha // tiny noise — smooth it away
     } else if diff < 0.15 {
-        base_alpha + (diff - 0.03) / 0.12 * (0.5 - base_alpha) // ramp 0.03→0.5
+        (base_alpha + (diff - 0.03) / 0.12 * (0.5 - base_alpha)).clamp(base_alpha, 0.5)
     } else {
-        0.5 + (diff - 0.15) * 2.0 // large jump: 0.5→~0.8
+        (0.5 + (diff - 0.15) * 2.0).min(0.9) // large jump: cap at 0.9 to avoid overshoot
     }
 }
 
