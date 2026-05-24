@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tracing::{error, info, warn, Level};
+use tracing::{error, info, Level};
 
 #[cfg(target_os = "linux")]
 use rscam::{Camera, Config};
@@ -209,28 +209,30 @@ async fn main() -> Result<()> {
 
     let sample_handle = tokio::spawn(async move {
         #[cfg(target_os = "linux")]
-        let mut camera = match StreamingCamera::new(&args.device) {
-            Ok(c) => c,
+        let camera = match StreamingCamera::new(&args.device) {
+            Ok(c) => Arc::new(Mutex::new(c)),
             Err(e) => { error!("camera init failed: {e:#}"); return; }
         };
 
         let mut smoothed_val: f32 = current_ref.load(Ordering::SeqCst) as f32 / max_brightness as f32;
-        let mut _last_target = current_ref.load(Ordering::SeqCst);
 
         loop {
             #[cfg(target_os = "linux")]
             {
-                match camera.capture_frame() {
-                    Ok(frame) => {
-                        let ambient = luminance_from_frame(&frame) / 255.0;
-                        smoothed_val = alpha * ambient + (1.0 - alpha) * smoothed_val;
-                        let target = (min_brightness as f32 + smoothed_val * (max_brightness - min_brightness) as f32).round() as u32;
-                        let target = target.clamp(min_brightness, max_brightness);
-                        target_ref.store(target, Ordering::SeqCst);
-                        info!("luma={:.2} smoothed={:.3} target={} current={}",
-                            ambient, smoothed_val, target, current_ref.load(Ordering::SeqCst));
-                    }
-                    Err(e) => warn!("capture failed: {e:#}"),
+                let camera_clone = camera.clone();
+                let frame = tokio::task::spawn_blocking(move || {
+                    let mut cam = camera_clone.lock().unwrap();
+                    cam.capture_frame()
+                }).await;
+                
+                if let Ok(Ok(frame)) = frame {
+                    let ambient = luminance_from_frame(&frame) / 255.0;
+                    smoothed_val = alpha * ambient + (1.0 - alpha) * smoothed_val;
+                    let target = (min_brightness as f32 + smoothed_val * (max_brightness - min_brightness) as f32).round() as u32;
+                    let target = target.clamp(min_brightness, max_brightness);
+                    target_ref.store(target, Ordering::SeqCst);
+                    info!("luma={:.2} smoothed={:.3} target={} current={}",
+                        ambient, smoothed_val, target, current_ref.load(Ordering::SeqCst));
                 }
             }
             tokio::time::sleep(sample_interval).await;
