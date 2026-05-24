@@ -37,8 +37,12 @@ struct Args {
     ramp_seconds: f32,
 
     /// Interval between frame samples (ambient light measurement)
-    #[arg(long, default_value = "200ms")]
+    #[arg(long, default_value = "500ms")]
     sample_interval: humantime::Duration,
+
+    /// Minimum ambient change to trigger brightness update (0.0–0.1)
+    #[arg(long, default_value = "0.005")]
+    min_change: f32,
 
     /// Interval between brightness writes (smooth interpolation tick)
     #[arg(long, default_value = "5ms")]
@@ -286,6 +290,7 @@ async fn main() -> Result<()> {
         // Seed smoothed value from current brightness so we don't jump on startup
         let mut smoothed_val: f32 =
             current_ref.load(Ordering::SeqCst) as f32 / max_brightness as f32;
+        let mut last_target = current_ref.load(Ordering::SeqCst);
 
         loop {
             #[cfg(target_os = "linux")]
@@ -297,17 +302,23 @@ async fn main() -> Result<()> {
                         // Adaptive EMA: big change → fast alpha, small drift → slow alpha
                         let diff = (ambient - smoothed_val).abs();
                         let alpha = adaptive_alpha(base_alpha, diff);
-                        smoothed_val = alpha * ambient + (1.0 - alpha) * smoothed_val;
+                        let new_smoothed = alpha * ambient + (1.0 - alpha) * smoothed_val;
+                        
+                        // Only apply if the smoothed value changed significantly
+                        if (new_smoothed - smoothed_val).abs() > args.min_change {
+                            smoothed_val = new_smoothed;
+                            
+                            let target_f = min_brightness as f32
+                                + smoothed_val * (max_brightness - min_brightness) as f32;
+                            let target = target_f.round() as u32;
+                            let target = target.clamp(min_brightness, max_brightness);
 
-                        let target_f = min_brightness as f32
-                            + smoothed_val * (max_brightness - min_brightness) as f32;
-                        let target = target_f.round() as u32;
-                        let target = target.clamp(min_brightness, max_brightness);
-
-                        // Hysteresis: only update target if it changed by more than 1
-                        let old_target = target_ref.load(Ordering::SeqCst);
-                        if (target as i32 - old_target as i32).abs() > 1 {
-                            target_ref.store(target, Ordering::SeqCst);
+                            // Hysteresis: only update target if it changed by more than 1
+                            let old_target = target_ref.load(Ordering::SeqCst);
+                            if (target as i32 - old_target as i32).abs() > 1 {
+                                target_ref.store(target, Ordering::SeqCst);
+                                last_target = target;
+                            }
                         }
 
                         info!(
@@ -315,7 +326,7 @@ async fn main() -> Result<()> {
                             ambient,
                             alpha,
                             smoothed_val,
-                            target,
+                            last_target,
                             current_ref.load(Ordering::SeqCst),
                         );
                     }
