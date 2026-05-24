@@ -28,15 +28,15 @@ struct Args {
     #[arg(long, default_value = "0.05")]
     min_fraction: f32,
 
-    /// EMA alpha for ambient-light smoothing (0.01 = very slow, 1.0 = no smoothing)
-    #[arg(long, default_value = "0.08")]
+    /// EMA alpha for small ambient changes (tiny fluctuations are smoothed away)
+    #[arg(long, default_value = "0.10")]
     alpha: f32,
 
-    /// Time in seconds for brightness to traverse the full range (lower = snappier)
+    /// Time in seconds for brightness to traverse the full range
     #[arg(long, default_value = "2.0")]
     ramp_seconds: f32,
 
-    /// Interval between frame samples
+    /// Interval between frame samples (ambient light measurement)
     #[arg(long, default_value = "1s")]
     sample_interval: humantime::Duration,
 
@@ -65,7 +65,9 @@ fn find_backlight(name: Option<&str>) -> Result<PathBuf> {
         let path = entry.path();
         let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
         if let Some(wanted) = name {
-            if file_name != wanted { continue; }
+            if file_name != wanted {
+                continue;
+            }
         }
         if path.join("brightness").exists() && path.join("max_brightness").exists() {
             return Ok(path);
@@ -79,24 +81,34 @@ fn find_backlight(name: Option<&str>) -> Result<PathBuf> {
 
 fn read_sysfs_u32(path: &PathBuf, file: &str) -> Result<u32> {
     let p = path.join(file);
-    let s = std::fs::read_to_string(&p).with_context(|| format!("cannot read {}", p.display()))?;
-    s.trim().parse::<u32>().with_context(|| format!("invalid number in {}", p.display()))
+    let s =
+        std::fs::read_to_string(&p).with_context(|| format!("cannot read {}", p.display()))?;
+    s.trim()
+        .parse::<u32>()
+        .with_context(|| format!("invalid number in {}", p.display()))
 }
 
 fn write_brightness(backlight: &PathBuf, value: u32) -> Result<()> {
     let p = backlight.join("brightness");
     let v = value.to_string();
-    if std::fs::write(&p, &v).is_ok() { return Ok(()); }
+    if std::fs::write(&p, &v).is_ok() {
+        return Ok(());
+    }
     let mut child = std::process::Command::new("sudo")
         .args(["tee", p.to_str().unwrap_or("?")])
         .stdin(std::process::Stdio::piped())
-        .spawn().context("failed to run sudo")?;
+        .spawn()
+        .context("failed to run sudo")?;
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
         let _ = writeln!(stdin, "{v}");
     }
     let status = child.wait().context("failed to wait for sudo")?;
-    if status.success() { Ok(()) } else { anyhow::bail!("cannot write brightness") }
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("cannot write brightness")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -104,20 +116,35 @@ fn write_brightness(backlight: &PathBuf, value: u32) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
-struct StreamingCamera { cam: Camera }
+struct StreamingCamera {
+    cam: Camera,
+}
 
 #[cfg(target_os = "linux")]
 impl StreamingCamera {
     fn new(device: &str) -> Result<Self> {
         let mut cam = Camera::new(device)?;
-        let config = Config { interval: (1, 30), resolution: (320, 240), format: b"MJPG", ..Default::default() };
+        let config = Config {
+            interval: (1, 30),
+            resolution: (320, 240),
+            format: b"MJPG",
+            ..Default::default()
+        };
         match cam.start(&config) {
             Ok(()) => {}
-            Err(_) => { cam.start(&Config { interval: (1, 30), resolution: (320, 240), format: b"YUYV", ..Default::default() })?; }
+            Err(_) => {
+                cam.start(&Config {
+                    interval: (1, 30),
+                    resolution: (320, 240),
+                    format: b"YUYV",
+                    ..Default::default()
+                })?;
+            }
         }
         info!("camera streaming started (LED on)");
         Ok(Self { cam })
     }
+
     fn capture_frame(&mut self) -> Result<Vec<u8>> {
         Ok(self.cam.capture()?.to_vec())
     }
@@ -135,7 +162,7 @@ fn luminance_from_frame(data: &[u8]) -> f32 {
         }
         return (sum / count as f64) as f32;
     }
-    // YUYV fallback
+    // YUYV fallback: Y0 U Y1 V — just average the Y values
     let mut sum: f64 = 0.0;
     let mut count: u64 = 0;
     for chunk in data.chunks_exact(4) {
@@ -146,13 +173,35 @@ fn luminance_from_frame(data: &[u8]) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+// Adaptive EMA: fast response to big changes, smooth for small ones
+// ---------------------------------------------------------------------------
+
+/// Returns an effective alpha that scales with the magnitude of the change.
+/// - Small drift (|diff| < 0.03):  use the baseline alpha (slow, stable)
+/// - Medium shift (|diff| 0.03–0.15): ramp up alpha for quicker tracking
+/// - Large jump   (|diff| > 0.15):  snap toward the new value fast
+fn adaptive_alpha(base_alpha: f32, diff: f32) -> f32 {
+    if diff < 0.03 {
+        base_alpha // tiny noise — smooth it away
+    } else if diff < 0.15 {
+        base_alpha + (diff - 0.03) / 0.12 * (0.5 - base_alpha) // ramp 0.03→0.5
+    } else {
+        0.5 + (diff - 0.15) * 2.0 // large jump: 0.5→~0.8
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let log_level = if args.verbose { Level::DEBUG } else { Level::INFO };
+    let log_level = if args.verbose {
+        Level::DEBUG
+    } else {
+        Level::INFO
+    };
     tracing_subscriber::fmt().with_max_level(log_level).init();
 
     let backlight = find_backlight(args.backlight.as_deref())?;
@@ -165,56 +214,105 @@ async fn main() -> Result<()> {
     let steps_for_full_range = (args.ramp_seconds / tick.as_secs_f32()).max(1.0);
     let ramp_per_tick = ((full_range / steps_for_full_range).round() as u32).max(1);
 
-    info!("backlight: {} range {}–{}, current {}", backlight.display(), min_brightness, max_brightness, current_brightness);
-    info!("sample {:?}, tick {:?}, ramp {}/tick", args.sample_interval, tick, ramp_per_tick);
+    info!(
+        "backlight: {} range {}–{}, current {}",
+        backlight.display(),
+        min_brightness,
+        max_brightness,
+        current_brightness
+    );
+    info!(
+        "sample {:?}, tick {:?}, ramp {}/tick (full range in {:.1}s)",
+        args.sample_interval,
+        tick,
+        ramp_per_tick,
+        args.ramp_seconds,
+    );
 
-    let current_brightness = Arc::new(AtomicU32::new(current_brightness));
-    let target_brightness = Arc::new(AtomicU32::new(current_brightness.load(Ordering::SeqCst)));
-    let smoothed = Arc::new(std::sync::atomic::AtomicU32::new((current_brightness.load(Ordering::SeqCst) as f32 / max_brightness as f32 * 255.0) as u32));
+    let current_brightness_arc = Arc::new(AtomicU32::new(current_brightness));
+    let target_brightness_arc = Arc::new(AtomicU32::new(current_brightness));
 
-    // Brightness tick task
-    let brightness_clone = current_brightness.clone();
-    let target_clone = target_brightness.clone();
+    // --- Brightness tick task: writes every `tick` ms, smoothly ramping ---
+    let current_clone = current_brightness_arc.clone();
+    let target_clone = target_brightness_arc.clone();
     let bl_clone = backlight.clone();
     let tick_handle = tokio::spawn(async move {
         loop {
             let target = target_clone.load(Ordering::SeqCst);
-            let mut current = brightness_clone.load(Ordering::SeqCst);
+            let current = current_clone.load(Ordering::SeqCst);
             if current != target {
-                current = if current < target { (current + ramp_per_tick).min(target) } else { current.saturating_sub(ramp_per_tick).max(target) };
-                let _ = write_brightness(&bl_clone, current);
-                brightness_clone.store(current, Ordering::SeqCst);
+                // Proportional moving average: bigger gap = faster movement
+                let diff = (target as i32 - current as i32).abs() as f32;
+                let step = (diff * 0.15).clamp(1.0, ramp_per_tick as f32).round() as u32;
+                let next = if current < target {
+                    (current + step).min(target)
+                } else {
+                    current.saturating_sub(step).max(target)
+                };
+                if write_brightness(&bl_clone, next).is_ok() {
+                    current_clone.store(next, Ordering::SeqCst);
+                } else if let Ok(actual) = read_sysfs_u32(&bl_clone, "brightness") {
+                    // Sync with reality on write failure
+                    current_clone.store(actual, Ordering::SeqCst);
+                }
             }
             tokio::time::sleep(tick).await;
         }
     });
 
-    // Camera sampling task
+    // --- Camera sampling task: captures every second, computes target ---
     let sample_interval: Duration = args.sample_interval.into();
+    let base_alpha = args.alpha;
+
+    let current_ref = current_brightness_arc.clone();
+    let target_ref = target_brightness_arc.clone();
+
     let sample_handle = tokio::spawn(async move {
         #[cfg(target_os = "linux")]
         let mut camera = match StreamingCamera::new(&args.device) {
             Ok(c) => c,
-            Err(e) => { error!("camera init failed: {}", e); return; }
+            Err(e) => {
+                error!("camera init failed: {e:#}");
+                return;
+            }
         };
-        
-        let mut smoothed_val = current_brightness.load(Ordering::SeqCst) as f32 / max_brightness as f32;
-        
+
+        // Seed smoothed value from current brightness so we don't jump on startup
+        let mut smoothed_val: f32 =
+            current_ref.load(Ordering::SeqCst) as f32 / max_brightness as f32;
+
         loop {
             #[cfg(target_os = "linux")]
             {
                 match camera.capture_frame() {
                     Ok(frame) => {
-                        let luma = luminance_from_frame(&frame) / 255.0;
-                        smoothed_val = args.alpha * luma + (1.0 - args.alpha) * smoothed_val;
-                        let target = (min_brightness as f32 + smoothed_val * (max_brightness - min_brightness) as f32).round() as u32;
+                        let ambient = luminance_from_frame(&frame) / 255.0;
+
+                        // Adaptive EMA: big change → fast alpha, small drift → slow alpha
+                        let diff = (ambient - smoothed_val).abs();
+                        let alpha = adaptive_alpha(base_alpha, diff);
+                        smoothed_val = alpha * ambient + (1.0 - alpha) * smoothed_val;
+
+                        let target_f = min_brightness as f32
+                            + smoothed_val * (max_brightness - min_brightness) as f32;
+                        let target = target_f.round() as u32;
                         let target = target.clamp(min_brightness, max_brightness);
-                        target_brightness.store(target, Ordering::SeqCst);
-                        info!("luma={:.2} target={} current={}", luma, target, current_brightness.load(Ordering::SeqCst));
+
+                        target_ref.store(target, Ordering::SeqCst);
+
+                        info!(
+                            "luma={:.2} alpha={:.2} smoothed={:.3} target={} current={}",
+                            ambient,
+                            alpha,
+                            smoothed_val,
+                            target,
+                            current_ref.load(Ordering::SeqCst),
+                        );
                     }
-                    Err(e) => warn!("capture failed: {}", e),
+                    Err(e) => warn!("capture failed: {e:#}"),
                 }
             }
+
             tokio::time::sleep(sample_interval).await;
         }
     });
